@@ -1,5 +1,6 @@
 import argparse
 import os
+import warnings
 
 import fiona
 import geopandas as gpd
@@ -9,6 +10,7 @@ from matplotlib.patches import Patch
 from matplotlib_scalebar.scalebar import ScaleBar
 from shapely.geometry import LineString, MultiPoint, Point, Polygon, box
 
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 
 def calculate_distance(geometry):
     if isinstance(geometry, MultiPoint):
@@ -18,17 +20,14 @@ def calculate_distance(geometry):
     elif isinstance(geometry, LineString):
         return round(geometry.length / 1000, 2)  # Convert meters to kilometers and round to the nearest hundredth
     elif isinstance(geometry, Point):
-        return 0  # A single point has no length
+        print(f"Warning: Found a Point geometry. Cannot calculate distance.")
+        return None
     else:
-        return 0  # Handle other geometry types accordingly
+        print(f"Warning: Unexpected geometry type: {type(geometry)}. Cannot calculate distance.")
+        return None
 
-def determine_availability(row):
-    if row['availability'] == 's':
-        return 'yes'
-    elif row['availability'] == 'u':
-        return 'no'
-    else:
-        return 'outdated'
+def is_available(row):
+    return row['availability'] == 's'
 
 def plot_data_on_basemap(basemap, gdf, institution, filename, output_folder):
     # Define the colors for the categories
@@ -67,33 +66,32 @@ def plot_data_on_basemap(basemap, gdf, institution, filename, output_folder):
         # Inside circle: plot with original color
         if not inside.empty:
             if category == 'Ocean':
-                inside.plot(ax=ax, color=color, edgecolor='black')
+                inside.plot(ax=ax, color=color, edgecolor='none')
             else:
-                inside.plot(ax=ax, color=color, edgecolor='black')
+                inside.plot(ax=ax, color=color, edgecolor='none')
 
         # Outside circle: plot with white color for 'Ocean'
         if not outside.empty:
             if category == 'Ocean':
-                outside.plot(ax=ax, color='white', edgecolor='black')
+                outside.plot(ax=ax, color='white', edgecolor='none')
             else:
-                outside.plot(ax=ax, color=color, edgecolor='black')
+                outside.plot(ax=ax, color=color, edgecolor='none')
 
     # Debug: print basemap information
     print("Basemap categories and colors:")
     print(basemap[['Category', 'color']].drop_duplicates())
 
     # Define colors and labels based on availability
-    availability_colors = {'u': '#fb9a99', 's': '#1f78bc', 'o': 'grey'}
-    availability_labels = {'u': 'Unavailable', 's': 'Available', 'o': 'Outdated'}
+    availability_colors = {'u': '#fb9a99', 's': '#1f78bc', 'a': 'grey'}
+    availability_labels = {'u': 'Unavailable', 's': 'Available', 'a': 'Unsupported'}
 
     # Plot the data for the institution
     if not gdf.empty:
-        for availability in ['s', 'u', 'o']:  # Ensure the order of plotting
+        for availability, color in availability_colors.items():
             subset = gdf[gdf['availability'] == availability]
             if not subset.empty:
-                color = availability_colors.get(availability, 'darkgrey')
                 label = availability_labels.get(availability, 'Other')
-                subset.plot(ax=ax, color=color, markersize=0.55, linewidth=0.25, label=label)
+                subset.plot(ax=ax, color=color, markersize=0.55, linewidth=0.25, label=label, zorder=2 if availability == 's' else 1)
 
     # Debug: print GeoDataFrame information
     print("Institution GeoDataFrame:")
@@ -116,9 +114,6 @@ def plot_data_on_basemap(basemap, gdf, institution, filename, output_folder):
     scalebar_y = -2.8e6
     ax.plot([scalebar_x, scalebar_x + scalebar_length_m], [scalebar_y, scalebar_y], color='black', lw=2)
     ax.text(scalebar_x + scalebar_length_m / 2, scalebar_y - 2e5, f'{scalebar_length_km} km', ha='center', va='top')
-
-
-
 
     plt.title(f'{institution} Data Availability', fontsize=14)
 
@@ -143,20 +138,37 @@ def plot_data_on_basemap(basemap, gdf, institution, filename, output_folder):
 
     # Save the plot to the data folder
     output_path = os.path.join(output_folder, filename)
-    plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1)
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
     plt.close(fig)
     print(f"Saved map for {institution} to {output_path}")
 
 def main(input_file_path, map_path, output_folder, statistics_folder):
+    print(f"Processing GeoPackage: {input_file_path}")
+    print(f"Using map file: {map_path}")
+    print(f"Output folder: {output_folder}")
+    print(f"Statistics folder: {statistics_folder}")
+
     # Ensure the output folders exist
     os.makedirs(output_folder, exist_ok=True)
     os.makedirs(statistics_folder, exist_ok=True)
 
+    # Check if input files exist
+    if not os.path.exists(input_file_path):
+        raise FileNotFoundError(f"Input file not found: {input_file_path}")
+    if not os.path.exists(map_path):
+        raise FileNotFoundError(f"Map file not found: {map_path}")
+
     # Read the GeoPackage file into a GeoDataFrame
     fp = gpd.read_file(input_file_path)
+    if fp.empty:
+        print("The GeoPackage file is empty.")
+        return
 
     # Read the map shapefile
     mp = gpd.read_file(map_path)
+    if mp.empty:
+        print("The map file is empty.")
+        return
 
     # Check if the 'Category' column exists
     if 'Category' not in mp.columns:
@@ -194,6 +206,9 @@ def main(input_file_path, map_path, output_folder, statistics_folder):
     for layer in layers:
         try:
             gdf = gpd.read_file(input_file_path, layer=layer)  # Read the full layer
+            print(f"Successfully read layer: {layer}")
+            print(f"Layer shape: {gdf.shape}")
+            print(f"Columns: {gdf.columns}")
             if 'institution' in gdf.columns:
                 institutions = gdf['institution'].unique()
                 for institution in institutions:
@@ -201,7 +216,7 @@ def main(input_file_path, map_path, output_folder, statistics_folder):
                         institution_layers[institution] = []
                     institution_layers[institution].append(layer)
         except Exception as e:
-            print(f"Error reading layer {layer}: {e}")
+            print(f"Error reading layer {layer}: {str(e)}")
 
     print("Institution layers mapping:")
     print(institution_layers)
@@ -214,19 +229,18 @@ def main(input_file_path, map_path, output_folder, statistics_folder):
         institution_data = []
 
         print(f"\nProcessing institution: {institution}")
+        print(f"Layers for this institution: {layers}")
 
         for layer in layers:
-            print(f"Checking layer: {layer}")
             try:
-                gdf = gpd.read_file(input_file_path, layer=layer)  # Read the full layer
-
-                if 'institution' in gdf.columns and institution in gdf['institution'].unique():
-                    print(f"Layer '{layer}' contains '{institution}'.")
-                    institution_data.append(gdf[gdf['institution'] == institution])
-                else:
-                    print(f"Layer '{layer}' does not contain '{institution}' or does not have 'institution' column.")
+                gdf = gpd.read_file(input_file_path, layer=layer)
+                print(f"Successfully read layer '{layer}' for institution '{institution}'")
+                print(f"Layer shape: {gdf.shape}")
+                institution_subset = gdf[gdf['institution'] == institution]
+                print(f"Subset shape for institution: {institution_subset.shape}")
+                institution_data.append(institution_subset)
             except Exception as e:
-                print(f"Error processing layer {layer}: {e}")
+                print(f"Error processing layer {layer} for institution {institution}: {str(e)}")
 
         # Combine all dataframes for the institution
         if institution_data:
@@ -238,21 +252,42 @@ def main(input_file_path, map_path, output_folder, statistics_folder):
         if not institution_gdf.empty:
             institution_gdf = institution_gdf.to_crs(mp.crs)
 
+        print(f"Basemap CRS: {mp.crs}")
+        print(f"Institution data CRS: {institution_gdf.crs}")
+
+        # Calculate distances
+        institution_gdf['distance'] = institution_gdf['geometry'].apply(calculate_distance)
+        invalid_geometries = institution_gdf[institution_gdf['distance'].isnull()]
+        if not invalid_geometries.empty:
+            print(f"Warning: Found {len(invalid_geometries)} geometries that don't support distance calculation.")
+            print(invalid_geometries[['institution', 'campaign']])  # Adjust columns as needed
+        institution_gdf = institution_gdf.dropna(subset=['distance'])
+
         # Add to the overview GeoDataFrame
         if not institution_gdf.empty:
             overview_gdf = pd.concat([overview_gdf, institution_gdf])
 
         # Plot and save the aggregated data for the institution
-        plot_data_on_basemap(mp, institution_gdf, institution, f'Antarctica_coverage_{institution}.png', output_folder)
+        try:
+            plot_data_on_basemap(mp, institution_gdf, institution, f'Antarctica_coverage_{institution}.png', output_folder)
+        except Exception as e:
+            print(f"Error plotting data for {institution}: {str(e)}")
 
     # Ensure the CRS matches between the basemap and the overview GeoDataFrame
     if not overview_gdf.empty:
         overview_gdf = gpd.GeoDataFrame(overview_gdf).to_crs(mp.crs)
 
-    # Plot and save the overview map
-    plot_data_on_basemap(mp, overview_gdf, "Overview", 'Antarctica_coverage_overview.png', output_folder)
+    print(f"Creating overview map")
+    print(f"Overview GeoDataFrame shape: {overview_gdf.shape}")
+    print(f"Unique institutions in overview: {overview_gdf['institution'].unique()}")
 
-    print("All maps have been created and saved to the data3 folder.")
+    # Plot and save the overview map
+    try:
+        plot_data_on_basemap(mp, overview_gdf, "Overview", 'Antarctica_coverage_overview.png', output_folder)
+    except Exception as e:
+        print(f"Error plotting overview map: {str(e)}")
+
+    print("All maps have been created and saved to the output folder.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate maps and statistics from GeoPackage data.')
@@ -263,3 +298,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args.input_file_path, args.map_path, args.output_folder, args.statistics_folder)
+
+# Run the script with example input
+# python3 generate_maps.py /Users/nathanbekele/Documents/Coding Projects/Research/antarctic_index.gpkg /Users/nathanbekele/Downloads/Quantarctica3/Miscellaneous/SimpleBasemap/ADD_DerivedLowresBasemap.shp scripts/data1 scripts/data_statistics
